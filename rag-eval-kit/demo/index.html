@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>rag-eval-kit — Demo</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  input, button { font-size: 1rem; padding: 0.5rem; }
+  #q { width: 70%; } button { cursor: pointer; }
+  pre { background: #f4f4f4; padding: 1rem; white-space: pre-wrap; word-break: break-word; }
+  .card { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin: 1rem 0; }
+  .muted { color: #666; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<h1>rag-eval-kit — Demo</h1>
+<p class="muted">Needs the API running: <code>uvicorn app.main:app</code> on localhost:8000. No key required.</p>
+
+<div class="card">
+  <input id="q" value="How long does a refund take after the warehouse receives the return?" />
+  <button onclick="ask()">Ask</button>
+  <button onclick="runEval()">Run /evaluate</button>
+  <button onclick="showTraces()">Traces</button>
+</div>
+
+<div class="card"><h2>Answer</h2><pre id="out">Ask a question to see the extractive answer, citations and trace_id.</pre></div>
+<div class="card"><h2>Evaluation / Traces</h2><pre id="eval">—</pre></div>
+
+<script>
+const API = "http://localhost:8000";
+async function ask() {
+  const query = document.getElementById("q").value;
+  const res = await fetch(API + "/query", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({query, top_k: 5})
+  });
+  const data = await res.json();
+  document.getElementById("out").textContent = JSON.stringify(data, null, 2);
+}
+async function runEval() {
+  const res = await fetch(API + "/evaluate", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({top_k: 5})
+  });
+  document.getElementById("eval").textContent = JSON.stringify(await res.json(), null, 2);
+}
+async function showTraces() {
+  const res = await fetch(API + "/traces?limit=5");
+  document.getElementById("eval").textContent = JSON.stringify(await res.json(), null, 2);
+}
+</script>
+</body>
+</html>
