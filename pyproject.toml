@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rag-eval-kit"
-version = "0.1.0"
-description = "Offline RAG evaluation toolkit: TF-IDF retrieval, reranking, recall/citation/coverage metrics and tracing. No LLM API required by default."
+version = "0.2.0"
+description = "Offline RAG evaluation toolkit: TF-IDF retrieval, reranking, recall/citation/coverage metrics, chunking ablation and an optional OpenAI-compatible LLM mode. No LLM API required by default."
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [

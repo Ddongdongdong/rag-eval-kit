@@ -2,7 +2,8 @@
 
 An offline RAG evaluation toolkit: ingest documents, retrieve with TF-IDF,
 rerank, and score the result with reproducible metrics — no LLM API, no
-API key, no network required.
+API key, no network required by default. An optional OpenAI-compatible
+LLM mode exists but stays off unless you opt in with environment variables.
 
 Built for one question that every production RAG / Agent team has to answer:
 **did the retriever actually return the right evidence, and does the answer
@@ -27,7 +28,8 @@ reviewer can verify in 3 minutes.
 
 ```text
 data/sample_docs/*.md ──┐
-data/sample_qa.jsonl    │  (offline, no LLM)
+data/sample_qa.jsonl    │  (offline, no LLM by default)
+data/sample_qa_hard.jsonl│  (paraphrased + cross-doc)
                         ▼
               rag/chunker.py ── fixed-length / heading strategies
                         │
@@ -46,15 +48,22 @@ data/sample_qa.jsonl    │  (offline, no LLM)
    GET /health · POST /ingest · POST /query
    POST /evaluate · GET /traces
                         │
-                        ▼
-            scripts/run_demo.py → reports/demo_report.md
-            demo/index.html (static frontend, calls the local API)
+            ┌───────────┴───────────┐
+            ▼                       ▼
+   scripts/run_demo.py     scripts/ablation.py
+   → reports/demo_report.md → reports/ablation_report.md
+   demo/index.html (static frontend, calls the local API)
 ```
 
-Key design choice: the evaluation core never calls an LLM. Retrieval is
-TF-IDF (standard library only), answers are extractive. `rag/llm.py`
-is the single, **disabled-by-default** seam where a real model can be
-plugged in later — see Roadmap.
+Key design choice: the evaluation core never calls an LLM by default.
+Retrieval is TF-IDF (standard library only), answers are extractive.
+`rag/llm.py` is the single, **disabled-by-default** seam where a real
+model can be plugged in — set `RAG_EVAL_LLM=1` plus
+`RAG_EVAL_LLM_BASE_URL` / `RAG_EVAL_LLM_API_KEY` /
+`RAG_EVAL_LLM_MODEL` and run with `--mode llm`. Without them the
+llm run fails loudly instead of silently falling back to extractive
+answers. `scripts/ablation.py` runs fixed vs heading chunking over
+both QA sets and prints the Recall@k curves.
 
 ## Quick start
 
@@ -66,8 +75,15 @@ cd rag-eval-kit
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# 1. One-click demo — ingest + evaluate, writes reports/demo_report.md
+# 1. One-click demo — ingest + evaluate both QA sets, writes reports/demo_report.md
 python scripts/run_demo.py
+
+# 1b. Chunking ablation — fixed vs heading, writes reports/ablation_report.md
+python scripts/ablation.py
+
+# 1c. LLM answers (optional; fails loudly without env vars, see rag/llm.py)
+RAG_EVAL_LLM=1 RAG_EVAL_LLM_BASE_URL=<url> RAG_EVAL_LLM_API_KEY=<key> \
+  RAG_EVAL_LLM_MODEL=<model> python scripts/run_demo.py --mode llm
 
 # 2. API server (sample docs are auto-loaded on startup)
 uvicorn app.main:app --reload
@@ -80,6 +96,8 @@ curl -X POST http://127.0.0.1:8000/query \
   -d '{"query": "How long does a refund take?", "top_k": 3}'
 curl -X POST http://127.0.0.1:8000/evaluate \
   -H 'Content-Type: application/json' -d '{"top_k": 5}'
+curl -X POST http://127.0.0.1:8000/evaluate \
+  -H 'Content-Type: application/json' -d '{"top_k": 5, "qa_set": "hard"}'
 
 # 4. Tests
 pytest -q
@@ -119,26 +137,41 @@ Notes on reading the numbers honestly:
   extractive answer should score near 0; a generative answer that
   invents numbers will score high.
 
-## Example results
+## Example results (v0.2)
 
-Bundled demo set: 6 generic business documents, 22 chunks
-(heading strategy), 12 QA pairs, `top_k=5`, rerank on.
-Reproduce with `python scripts/run_demo.py` — full table in
-[`reports/demo_report.md`](reports/demo_report.md).
+Bundled demo sets: 6 generic business documents, 22 chunks
+(heading strategy), 12 QA pairs per set, `top_k=5`, rerank on.
+Reproduce with `python scripts/run_demo.py` — full tables in
+[`reports/demo_report.md`](reports/demo_report.md); chunking
+comparison in [`reports/ablation_report.md`](reports/ablation_report.md).
 
-| Metric | Value |
-|---|---|
-| Recall@5 | **1.000** |
-| Citation accuracy | **1.000** |
-| Answer coverage | **0.363** |
-| Hallucination proxy | **0.009** |
+| QA set | Recall@5 | Citation accuracy | Answer coverage | Hallucination proxy |
+|---|---|---|---|---|
+| easy | **1.000** | **1.000** | 0.363 | 0.009 |
+| hard (paraphrased + cross-doc) | **1.000** | **1.000** | 0.410 | 0.007 |
 
 Interpretation: on this small, cleanly separated sample set the
 retriever finds the right document every time, and the extractive
-answer stays inside the retrieved context (hallucination proxy 0.009).
-Coverage 0.363 reflects the conservative extractive answer, not a
-retrieval failure — see the metric notes above. On a larger, messier
-corpus these numbers will drop; that is the point of having the harness.
+answer stays inside the retrieved context (hallucination proxy ≤0.009).
+Coverage reflects the conservative extractive answer, not a retrieval
+failure — see the metric notes above.
+
+Read the hard set honestly: it does **not** break Recall@5. Both sets
+sit at 1.000 at k=5, because top-5 over a 6-document corpus is too
+forgiving to discriminate. Where the hard set bites is at smaller k:
+
+| Recall@k | easy / fixed | easy / heading | hard / fixed | hard / heading |
+|---|---|---|---|---|
+| @1 | 1.000 | 0.917 | 0.667 | 0.667 |
+| @3 | 1.000 | 0.917 | 0.917 | 1.000 |
+| @5 | 1.000 | 1.000 | 1.000 | 1.000 |
+
+At k=1 the paraphrased and cross-document questions drop recall from
+0.917–1.000 (easy) to 0.667 (hard). The chunking ablation itself is
+nearly a tie at k≥3 — fixed is ahead at Recall@1 on the easy set
+(1.000 vs 0.917) and the two tie at k=5 everywhere. On a corpus this
+small that is the real finding: the next discrimination has to come
+from a bigger, messier corpus (v0.3), not from a third chunking strategy.
 
 ## Project layout
 
@@ -148,32 +181,35 @@ rag/chunker.py         fixed-length + heading/paragraph chunking
 rag/retriever.py       TF-IDF retriever + overlap rerank (stdlib only)
 rag/evaluator.py       Recall@k, citation accuracy, coverage, hallucination proxy
 rag/trace.py           JSONL trace log (trace_id, latency, retrieved ids)
-rag/llm.py             optional LLM seam, disabled by default
+rag/llm.py             optional OpenAI-compatible LLM client, disabled by default
 data/sample_docs/      6 generic business docs (written for this repo)
 data/sample_qa.jsonl   12 QA pairs with gold answers + gold doc ids
-scripts/run_demo.py    one-click demo → reports/demo_report.md
+data/sample_qa_hard.jsonl  12 harder QA pairs: 6 paraphrased, 6 cross-doc
+scripts/run_demo.py    one-click demo → reports/demo_report.md (--mode extractive|llm)
+scripts/ablation.py    fixed vs heading ablation → reports/ablation_report.md
 demo/index.html        minimal static frontend
-tests/                 13 pytest cases (chunker, retriever, evaluator, trace)
+tests/                 20 pytest cases (chunker, retriever, evaluator, trace, v0.2)
 Dockerfile, pyproject.toml, requirements.txt, LICENSE (MIT)
 ```
 
 ## Roadmap
 
-- [ ] **v0.2 — Real LLM answers, side by side.** Implement
-  `rag/llm.py:LLMClient.generate()` for an OpenAI-compatible endpoint
-  (e.g. DeepSeek), key read from the environment only, and add a
-  `--mode extractive|llm` flag so the same QA set scores both modes.
-  Expected effect: coverage up, hallucination proxy becomes the
-  interesting metric.
-- [ ] **v0.2 — Better retrieval.** Embedding retriever behind the same
-  `search()` interface, hybrid TF-IDF + embedding, and Recall@k
-  curves for k = 1 / 3 / 5 / 10.
-- [ ] **v0.3 — Chunking ablation.** One command that runs
-  fixed vs heading chunking over the QA set and prints the metric
-  delta — the experiment this kit exists to run.
-- [ ] **v0.3 — Eval datasets.** A second, harder QA set with
-  paraphrased questions and multi-doc questions, so Recall@5 stops
-  saturating at 1.0.
+- [x] **v0.2 — Real LLM answers, side by side.** `rag/llm.py:LLMClient.generate()`
+  is implemented for OpenAI-compatible endpoints, key read from the
+  environment only, with `--mode extractive|llm` scoring both modes on
+  the same QA set. Without env vars the llm run fails loudly; it never
+  silently falls back to extractive answers.
+- [x] **v0.2 — Recall@k curves.** `scripts/ablation.py` runs fixed vs
+  heading chunking over both QA sets and prints Recall@1/3/5/10.
+- [x] **v0.2 — Harder eval set.** `data/sample_qa_hard.jsonl`: 6 paraphrased
+  + 6 cross-document questions. It discriminates at Recall@1 (0.667 vs
+  0.917–1.000 easy), not at Recall@5 — see the honest note above.
+- [ ] **v0.3 — Better retrieval.** Embedding retriever behind the same
+  `search()` interface, hybrid TF-IDF + embedding, and the same
+  Recall@k curves to show whether embeddings actually help.
+- [ ] **v0.3 — Bigger, messier eval set.** More documents with overlapping
+  vocabulary, paraphrased + multi-doc questions, so Recall@5 stops
+  saturating at 1.0 and the ablation can discriminate at k>=3.
 
 ## Contributing
 
@@ -209,9 +245,10 @@ API Key，不需要联网。
 
 ## 架构
 
-见上面英文部分的架构图。核心设计：评测核心永远不调 LLM，
+见上面英文部分的架构图。核心设计：评测核心默认不调 LLM，
 检索是纯标准库 TF-IDF，答案是抽取式的。`rag/llm.py` 是唯一
-的、**默认关闭**的 LLM 接入点，以后接真实模型只改这一个文件。
+的、**默认关闭**的 LLM 接入点，v0.2 已实现 OpenAI 兼容调用，
+Key 只从环境变量读；无配置时明确报错，不会静默回退。
 
 ## 快速开始
 
@@ -220,13 +257,17 @@ Python 3.11+：
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-python scripts/run_demo.py        # 一键 Demo，生成 reports/demo_report.md
+python scripts/run_demo.py        # 一键 Demo，两套题都跑，生成 reports/demo_report.md
+python scripts/ablation.py        # 切分消融，生成 reports/ablation_report.md
 uvicorn app.main:app --reload     # API，启动时自动加载示例文档
 pytest -q                         # 测试
+# LLM 模式（可选，无环境变量会明确报错，不会静默回退）：
+RAG_EVAL_LLM=1 RAG_EVAL_LLM_BASE_URL=<url> RAG_EVAL_LLM_API_KEY=<key> \
+  RAG_EVAL_LLM_MODEL=<model> python scripts/run_demo.py --mode llm
 ```
 
 接口：`GET /health`、`POST /ingest`、`POST /query`、
-`POST /evaluate`、`GET /traces`，交互文档在 `/docs`。
+`POST /evaluate`（可传 `{"qa_set": "hard"}` 跑难题集）、`GET /traces`，交互文档在 `/docs`。
 
 ## 指标定义
 
@@ -243,38 +284,49 @@ pytest -q                         # 测试
 不适合拿绝对值去跟别的系统比。幻觉代理指标只是代理指标，
 不是对单条答案的定性判断。
 
-## 示例结果
+## 示例结果（v0.2）
 
 自带 Demo 集：6 篇通用业务文档、22 个 chunk（按标题切分）、
-12 条问答，`top_k=5`，开 Rerank。跑 `python scripts/run_demo.py`
-可复现，完整表格见 `reports/demo_report.md`。
+每套 12 条问答，`top_k=5`，开 Rerank。跑 `python scripts/run_demo.py`
+可复现，完整表格见 `reports/demo_report.md`，切分对比见
+`reports/ablation_report.md`。
 
-| 指标 | 数值 |
-|---|---|
-| Recall@5 | **1.000** |
-| 引用准确率 | **1.000** |
-| 答案覆盖率 | **0.363** |
-| 幻觉代理指标 | **0.009** |
+| 问答集 | Recall@5 | 引用准确率 | 答案覆盖率 | 幻觉代理指标 |
+|---|---|---|---|---|
+| 简单集 | **1.000** | **1.000** | 0.363 | 0.009 |
+| 难题集（改写 + 跨文档） | **1.000** | **1.000** | 0.410 | 0.007 |
 
-解读：在这套小而干净的示例集上，检索每次都找对了文档，
-抽取式答案也基本没有超出检索上下文（幻觉代理 0.009）。
-覆盖率 0.363 反映的是抽取式答案的保守性，不是检索失败。
-换成更大、更杂的语料，这些数字会下降——这正是要这个
-评测框架的原因。
+诚实说明：难题集**没有**把 Recall@5 打下来，两套题在 k=5 时
+都是 1.000——6 篇文档的语料上 top-5 太宽容了，区分不出来。
+难题集真正起作用的地方在更小的 k：
+
+| Recall@k | 简单集 / 固定 | 简单集 / 标题 | 难题集 / 固定 | 难题集 / 标题 |
+|---|---|---|---|---|
+| @1 | 1.000 | 0.917 | 0.667 | 0.667 |
+| @3 | 1.000 | 0.917 | 0.917 | 1.000 |
+| @5 | 1.000 | 1.000 | 1.000 | 1.000 |
+
+改写和跨文档问题把 Recall@1 从 0.917–1.000 拉到 0.667。
+切分消融本身在 k≥3 时基本打平——固定切分在简单集 Recall@1
+上领先（1.000 对 0.917），k=5 时处处打平。语料这么小，这个
+结论本身就是发现：下一步的区分度要靠更大、更杂的语料（v0.3），
+而不是第三种切分方法。
 
 ## Roadmap
 
-- **v0.2：接真实 LLM，并排对比。** 在 `rag/llm.py` 里实现
-  OpenAI 兼容接口（如 DeepSeek），Key 只从环境变量读，
-  加 `--mode extractive|llm`，同一套题同时测两种答案。
-  预期：覆盖率上升，幻觉代理指标变成真正值得看的指标。
-- **v0.2：更好的检索。** 在同一个 `search()` 接口后面接
-  向量检索，做 TF-IDF + 向量的混合检索，出 k=1/3/5/10
-  的 Recall 曲线。
-- **v0.3：切分消融实验。** 一条命令同时跑固定长度切分
-  和按标题切分，输出指标差值——这正是这个工具存在的意义。
-- **v0.3：更难的评测集。** 加一套改写过的问题和跨文档
-  问题，让 Recall@5 不再轻易到 1.0。
+- **v0.2 已完成：接真实 LLM，并排对比。** `rag/llm.py` 已实现
+  OpenAI 兼容接口，Key 只从环境变量读，加 `--mode extractive|llm`，
+  同一套题同时测两种答案。无环境变量时明确报错，绝不静默回退。
+- **v0.2 已完成：切分消融实验。** `scripts/ablation.py` 一条命令
+  同时跑固定长度切分和按标题切分，输出 Recall@1/3/5/10 曲线。
+- **v0.2 已完成：更难的评测集。** `data/sample_qa_hard.jsonl`：
+  6 条改写 + 6 条跨文档问题，在 Recall@1 上能区分（0.667 对
+  0.917–1.000），在 Recall@5 上还区分不出来——见上面的诚实说明。
+- **v0.3：更好的检索。** 在同一个 `search()` 接口后面接向量检索，
+  做 TF-IDF + 向量的混合检索，用同一套 Recall@k 曲线验证向量
+  到底有没有帮助。
+- **v0.3：更大、更杂的评测集。** 更多文档、词汇重叠更大，改写
+  和跨文档问题更多，让 Recall@5 不再轻易到 1.0。
 
 ## License
 

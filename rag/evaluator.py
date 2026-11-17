@@ -19,6 +19,8 @@ returns aggregate metrics plus one row per question.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from .retriever import TFIDFRetriever, rerank, tokenize
 
 
@@ -86,12 +88,16 @@ def evaluate_dataset(
     retriever: TFIDFRetriever,
     top_k: int = 5,
     use_rerank: bool = True,
+    answer_fn: Callable[[list[dict], str], str] | None = None,
 ) -> dict:
     """Evaluate ``qa`` against ``retriever``.
 
     Each QA item: ``{"question": str, "gold_answer": str,
     "gold_doc_ids": [str], "gold_chunk_ids": [str] (optional)}``.
-    Returns ``{"n": int, "top_k": int, "metrics": {...},
+    ``answer_fn`` — when given — is called as ``answer_fn(hits, question)``
+    to produce the answer for each question (e.g. an LLM answer built
+    from the retrieved context); by default the extractive answer is
+    used. Returns ``{"n": int, "top_k": int, "metrics": {...},
     "per_question": [...]}`` with mean Recall@k, citation accuracy,
     answer coverage and hallucination proxy.
     """
@@ -113,7 +119,7 @@ def evaluate_dataset(
             rec = recall_at_k(retrieved_docs, gold_docs, k=top_k)
         cit = citation_accuracy(retrieved_docs, gold_docs)
         context = " ".join(h["chunk"].get("text", "") for h in hits)
-        answer = extractive_answer(hits)
+        answer = answer_fn(hits, question) if answer_fn else extractive_answer(hits)
         cov = answer_coverage(answer, item.get("gold_answer", ""))
         hal = hallucination_proxy(answer, context)
         rows.append(

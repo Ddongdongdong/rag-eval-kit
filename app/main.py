@@ -30,9 +30,13 @@ from rag.trace import TraceLogger
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 SAMPLE_DOCS_DIR = BASE_DIR / "data" / "sample_docs"
-SAMPLE_QA_PATH = BASE_DIR / "data" / "sample_qa.jsonl"
+SAMPLE_QA_PATHS = {
+    "easy": BASE_DIR / "data" / "sample_qa.jsonl",
+    "hard": BASE_DIR / "data" / "sample_qa_hard.jsonl",
+}
+SAMPLE_QA_PATH = SAMPLE_QA_PATHS["easy"]
 
-app = FastAPI(title="rag-eval-kit", version="0.1.0")
+app = FastAPI(title="rag-eval-kit", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -68,6 +72,7 @@ class QueryIn(BaseModel):
 class EvaluateIn(BaseModel):
     top_k: int = 5
     use_rerank: bool = True
+    qa_set: str = Field(default="easy", pattern="^(easy|hard)$")
 
 
 def _load_sample_docs() -> list[dict]:
@@ -100,10 +105,11 @@ def _index(documents: list[dict], strategy: str = "heading", chunk_size: int = 5
     return len(chunks)
 
 
-def _load_sample_qa() -> list[dict]:
+def _load_sample_qa(qa_set: str = "easy") -> list[dict]:
     qa = []
-    if SAMPLE_QA_PATH.exists():
-        for line in SAMPLE_QA_PATH.read_text(encoding="utf-8").splitlines():
+    path = SAMPLE_QA_PATHS[qa_set]
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line:
                 qa.append(json.loads(line))
@@ -121,7 +127,7 @@ def _startup() -> None:
 def root() -> dict:
     return {
         "service": "rag-eval-kit",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "docs": "/docs",
         "endpoints": ["GET /health", "POST /ingest", "POST /query", "POST /evaluate", "GET /traces"],
     }
@@ -185,9 +191,9 @@ def query(payload: QueryIn) -> dict:
 def evaluate(payload: EvaluateIn) -> dict:
     if not _chunks:
         raise HTTPException(status_code=400, detail="index is empty, POST /ingest first")
-    qa = _load_sample_qa()
+    qa = _load_sample_qa(payload.qa_set)
     if not qa:
-        raise HTTPException(status_code=400, detail="no QA data found at data/sample_qa.jsonl")
+        raise HTTPException(status_code=400, detail=f"no QA data found for qa_set={payload.qa_set!r}")
     return evaluate_dataset(qa, _retriever, top_k=payload.top_k, use_rerank=payload.use_rerank)
 
 
